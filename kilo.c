@@ -7,6 +7,8 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <string.h>
+#include <time.h>
+#include <stdarg.h>
 
 #define KILO_VERSION "0.0.1"
 #define KILO_TAB_STOP 8
@@ -36,8 +38,11 @@ typedef struct erow {
     char *chars;
 } erow;
 struct editorConfig {
+    char *filename;
     int screenRows;
     int screenCols;
+    char statusmsg[80];
+    time_t statusmsg_time;
     int rowoff;
     int coloff;
     int rx;
@@ -198,12 +203,13 @@ void editorAppendRow(char *s, size_t len) {
 }
 //file i/o
 void editorOpen(char *filename) {
+    free(E.filename);
+    // E.filename = strdup(filename);
     FILE *fp = fopen(filename, "r");
     if (!fp) die("fopen");
     char *line = NULL;
     size_t linecap = 0;
     ssize_t linelen;
-    linelen = getline(&line, &linecap, fp);
     while ((linelen = getline(&line, &linecap, fp)) != -1) {
         while (linelen > 0 && (line[linelen - 1] == '\n' || line[linelen - 1] == '\r'))
             linelen--;
@@ -248,7 +254,33 @@ void editorScroll() {
         E.coloff = E.rx - E.screenCols + 1;
     }
 }
-
+void editorDrawStatusBar(struct abuf *ab) {
+    abAppend(ab, "\x1b[7m", 4);
+    char status[80], rstatus[80];
+    int len = snprintf(status, sizeof(status), "%.20s - %d lines", E.filename ? E.filename : "[No Name]", E.numrows);
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",
+    E.cy + 1, E.numrows);
+    if (len > E.screenCols) len = E.screenCols;
+    abAppend(ab, status, len);
+    while (len < E.screenCols) {
+    if (E.screenCols - len == rlen) {
+        abAppend(ab, rstatus, rlen);
+        break;
+    } else {
+        abAppend(ab, " ", 1);
+        len++;
+    }
+    }
+    abAppend(ab, "\x1b[m", 3);
+    abAppend(ab, "\r\n", 2);
+}
+void editorDrawMessageBar(struct abuf *ab) {
+    abAppend(ab, "\x1b[K", 3);
+    int msglen = strlen(E.statusmsg);
+    if (msglen > E.screenCols) msglen = E.screenCols;
+    if (msglen && time(NULL) - E.statusmsg_time < 5)
+        abAppend(ab, E.statusmsg, msglen);
+}
 void editorDrawRows(struct abuf *ab) {
     int y;
     for (y = 0; y < E.screenRows; y++) {
@@ -276,9 +308,7 @@ void editorDrawRows(struct abuf *ab) {
             abAppend(ab, &E.row[filerow].render[E.coloff], len);
         }
         abAppend(ab, "\x1b[K", 3);
-        if (y < E.screenRows - 1) {
-            abAppend(ab, "\r\n", 2);
-        }
+        abAppend(ab, "\r\n", 2);
     }
 }
 
@@ -289,9 +319,11 @@ void editorRefreshScreen() {
     abAppend(&ab, "\x1b[H", 3); //move cursor at 0,0
 
     editorDrawRows(&ab);
-    
+    editorDrawStatusBar(&ab);
+    editorDrawMessageBar(&ab);  
+
     char buf[32];
-  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.rx - E.coloff) + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.rx - E.coloff) + 1);
     abAppend(&ab, buf, strlen(buf));
     
     abAppend(&ab, "\x1b[?25h", 6);
@@ -299,6 +331,15 @@ void editorRefreshScreen() {
     write(STDOUT_FILENO, ab.b, ab.len);
     abFree(&ab);
 }
+
+void editorSetStatusMessage(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(E.statusmsg, sizeof(E.statusmsg), fmt, ap);
+    va_end(ap);
+    E.statusmsg_time = time(NULL);
+}
+
 void editorMoveCursor(int key) {
     erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
     switch (key) {
@@ -337,7 +378,7 @@ void editorMoveCursor(int key) {
 }
 void editorProcessKeypress() {
     int c = editorReadKey();
-    erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+    // erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
     switch (c) {
         case CTRL_KEY('q'):
             cleanScreen();
@@ -381,7 +422,11 @@ void initEditor() {
     E.rx = 0;
     E.numrows = 0;
     E.row = NULL;
+    E.filename = NULL;
+    E.statusmsg[0] = '\0';
+    E.statusmsg_time = 0;
     if (getWindowSize(&E.screenRows, &E.screenCols) == -1) die("getWindowSize");
+    E.screenRows -= 2;
 }
 int main(int argc, char *argv[]) {
     enableRawMode();
@@ -389,10 +434,10 @@ int main(int argc, char *argv[]) {
     if (argc >= 2) {
         editorOpen(argv[1]);
     }
+    editorSetStatusMessage("HELP: Ctrl-Q = quit");
     while(1) {
         editorRefreshScreen();
         editorProcessKeypress();
     }
-
     return 0;
 }
